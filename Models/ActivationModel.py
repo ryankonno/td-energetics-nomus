@@ -8,11 +8,12 @@ The University of Queensland
 ###################################################################
 # Import
 import numpy as np
+from scipy.integrate import solve_ivp
 
 ###################################################################
 # Implementation of activation model from Mayfield et al. 2022.
 class ActivationModel():
-    def __init__(self, params, t = None):
+    def __init__(self, params, t):
         '''
         Initialisation
         '''
@@ -26,9 +27,10 @@ class ActivationModel():
 
         # Store the time vector
         self.t = t
+        self.dt = t[1] - t[0]
 
     ###################################################################
-    def runExcAct(self, t_stim_idx, w_0 = 0.0048):
+    def runExcAct(self, t_stim_idx, damping = True, w_0 = 0.0048):
         '''
         Function to run the excitation-activation dynamics
 
@@ -45,12 +47,17 @@ class ActivationModel():
         ca_vec = self.computeCa(self.tau_1, self.tau_2, t_stim_idx, w_0 = w_0) 
 
         # Compute the bound Ca 
-        catn_vec = self.hillEquation(ca_vec)
+        if damping: 
+            catn_vec = self.hillEquation(ca_vec)
+            act = self.computeCaTn(ca_vec, self.dt) # with damping
+        else:        
+            catn_vec = self.hillEquation(ca_vec)
+            act = catn_vec
 
         # Compute the stimulation values 
         stim_vec = self.stim(t_stim_idx, w_0 = w_0)
 
-        return stim_vec, ca_vec, catn_vec
+        return stim_vec, ca_vec, catn_vec, act
 
     ###################################################################
     def stim(self, t_stim_idx, w_0 = 0.0048):
@@ -67,7 +74,7 @@ class ActivationModel():
         '''
         t_n_1 = None
         stims = np.zeros(np.size(self.t)) # Get the the stimulus
-        dt = self.t[1] - self.t[0]
+        dt = self.dt
 
         # Loop over stimulation indexes
         for stim_idx in t_stim_idx:
@@ -155,5 +162,49 @@ class ActivationModel():
         '''
         K = self.params["K"]
         n = self.params["n"]
-        catn_vec_ = np.power(a,n)/(np.power(a,n) + K**n)
+        catn_vec_ = np.power(a,n) / (np.power(a,n) + K**n)
         return catn_vec_
+    
+    ###################################################################
+    def computeCaTn(self, a, dt): 
+        '''
+        Compute the bound CaTn concentrations accounting for damping 
+        Use a second order differential equation to smooth catn values.
+        
+        System: d²catn/dt² = (catn_raw - catn) / beta_ca_damp
+        where:
+          y[0] = catn (damped/smoothed concentration)
+          y[1] = d(catn)/dt (velocity)
+        
+        Input: 
+            a: concentration of free ca 
+            dt: time step
+        Output: 
+            catn_vec_: Damped CaTn Concentrations 
+        '''
+        # Get the damping constant
+        beta_ca_damp = self.params['beta_ca_damp']
+
+        # get the cutoff frequency constant 
+        omega_n = self.params['freq_cutoff'] * 2 * np.pi # radians / s
+
+        def rhs(t, y): 
+            # Get the target undamped catn from hill equation
+            catn_raw = self.hillEquation(np.interp(t, self.t, a)) # This is used as input to determine the activation
+            act = y[0] 
+            dactdt = y[1]
+
+            # New equation with a cutoff frequency 
+            # y[0] = act # output (damped signal ) 
+            # y[1] = dact/dt
+            d2act_dt2 = omega_n**2 * (catn_raw - act) - 2 * beta_ca_damp * omega_n * dactdt
+            
+            return [y[1], d2act_dt2]
+
+        # Solve the IVP 
+        y0 = [0, 0]
+        sol = solve_ivp(rhs, (self.t[0], self.t[-1]), y0, t_eval=self.t, method='RK45')
+        act_ = sol.y[0, :]
+        dactdt_ = sol.y[1, :]
+
+        return act_
